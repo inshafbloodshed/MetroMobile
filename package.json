@@ -11,6 +11,7 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
+    "better-sqlite3": "^12.11.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.26.0",
@@ -20,8 +21,6 @@
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject",
     "electron": "electron .",
     "electron-dev": "concurrently \"npm run start\" \"wait-on http://localhost:3000 && electron .\"",
     "electron-build": "npm run build && electron-builder",
@@ -55,6 +54,7 @@
     "electron": "^42.1.0",
     "electron-builder": "^25.1.8",
     "electron-is-dev": "^3.0.1",
+    "electron-rebuild": "^3.2.9",
     "wait-on": "^9.0.10"
   },
   "build": {
@@ -66,6 +66,8 @@
     "files": [
       "build/**/*",
       "public/electron.js",
+      "public/preload.js",
+      "public/icon.ico",
       "node_modules/**/*"
     ],
     "win": {
@@ -84,11 +86,15 @@
       "shortcutName": "Phone Repair App"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "public/icon.icns"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "icon": "public/icon.png"
     }
   }

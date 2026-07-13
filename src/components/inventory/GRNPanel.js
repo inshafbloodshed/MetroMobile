@@ -1,14 +1,14 @@
-import React, { useState } from 'react';
-import { load, save, toast } from '../../utils/storage';
-import { SK } from '../../utils/constants';
+// src/components/inventory/GRNPanel.js
+import React, { useState, useEffect , useRef } from 'react';
+import { load, save, toast, SK } from '../../utils/storage';
 import { padId } from '../../utils/helpers';
 import { styles } from '../../utils/styles';
 import { GlassCard } from '../common/GlassCard';
 import { Modal } from '../common/Modal';
 import { Field } from '../common/Field';
 import { FormGrid } from '../common/FormGrid';
-import { encryptCost, decryptCost } from '../../utils/encryption';
-import { genBarcodeNumber, barcodeSVGString } from '../../utils/barcode';
+import { encryptCost } from '../../utils/encryption';
+import { genBarcodeNumber } from '../../utils/barcode';
 import { BarcodePrintModal } from './BarcodePrintModal';
 
 // ─────────────────────────────────────────────────────────────
@@ -16,9 +16,11 @@ import { BarcodePrintModal } from './BarcodePrintModal';
 // ─────────────────────────────────────────────────────────────
 
 export function GRNPanel({ user }) {
-  const [products, setProducts] = useState(() => load(SK.PRODUCTS, []));
-  const [suppliers, setSuppliers] = useState(() => load(SK.SUPPLIERS, []));
-  const [grns, setGrns] = useState(() => load(SK.GRNS, []));
+  // State for data - initialize as empty arrays
+  const [products, setProducts] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  const [grns, setGrns] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   const [lines, setLines] = useState([]);
   const [supplier, setSupplier] = useState('');
@@ -43,7 +45,7 @@ export function GRNPanel({ user }) {
   });
   const [pendingName, setPendingName] = useState('');
 
-  // Add Line Modal states - REPLACES prompt()
+  // Add Line Modal states
   const [showAddLineModal, setShowAddLineModal] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [lineQty, setLineQty] = useState(1);
@@ -55,16 +57,68 @@ export function GRNPanel({ user }) {
   const [savedGrnId, setSavedGrnId] = useState('');
   const [showBarcodeModal, setShowBarcodeModal] = useState(false);
 
+  // ── Refresh function ──────────────────────────────────────
+  const refreshAllData = async () => {
+    try {
+      setLoading(true);
+      
+      const [productsData, suppliersData, grnsData] = await Promise.all([
+        window.api.getProducts(false),
+        window.api.getSuppliers(),
+        window.api.getGRNs()
+      ]);
+      
+      console.log('📊 Products from DB:', productsData?.length || 0);
+      console.log('📊 GRNs from DB:', grnsData?.length || 0);
+      
+      setProducts(productsData || []);
+      setSuppliers(suppliersData || []);
+      setGrns(grnsData || []);
+      
+      localStorage.setItem('products', JSON.stringify(productsData || []));
+      localStorage.setItem('suppliers', JSON.stringify(suppliersData || []));
+      localStorage.setItem('grns', JSON.stringify(grnsData || []));
+      
+    } catch (error) {
+      console.error('Error refreshing data:', error);
+      toast('Error refreshing data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ── Load data on component mount ──────────────────────────
+  useEffect(() => {
+    refreshAllData();
+  }, []);
+
   // ── helpers ──────────────────────────────────────────────
 
-  const nextGRN = () => padId(grns, 'PUR');
+  const nextGRN = () => {
+    const grnsArray = Array.isArray(grns) ? grns : [];
+    return padId(grnsArray, 'PUR');
+  };
 
   const filterSuggs = (term) => {
     setSearch(term);
-    if (!term.trim()) { setSuggestions([]); return; }
+    if (!term.trim()) { 
+      setSuggestions([]); 
+      return; 
+    }
     
-    const matches = products.filter(p => {
-      const fromSelectedSupplier = !supplier || p.supplierId === supplier;
+    const productsArray = Array.isArray(products) ? products : [];
+    
+    if (!supplier) {
+      setSuggestions([]);
+      return;
+    }
+    
+    console.log('🔍 Searching for:', term);
+    console.log('📊 Products available:', productsArray.length);
+    console.log('📊 Selected supplier:', supplier);
+    
+    const matches = productsArray.filter(p => {
+      const fromSelectedSupplier = p.supplier_id === supplier || p.supplierId === supplier;
       const isActive = p.active !== false;
       const matchesSearch = p.name?.toLowerCase().includes(term.toLowerCase()) ||
         (p.code || '').toLowerCase().includes(term.toLowerCase()) ||
@@ -74,11 +128,12 @@ export function GRNPanel({ user }) {
       return fromSelectedSupplier && isActive && matchesSearch;
     });
     
+    console.log('🔍 Matches found:', matches.length);
     setSuggestions(matches);
   };
 
-  // UPDATED: Opens modal instead of using prompt()
   const addLine = (prod) => {
+    console.log('➕ Adding product to GRN:', prod);
     setSelectedProduct(prod);
     setLineQty(1);
     setLineCost(prod.cost || 0);
@@ -86,7 +141,6 @@ export function GRNPanel({ user }) {
     setShowAddLineModal(true);
   };
 
-  // Confirms adding the line from modal
   const confirmAddLine = () => {
     if (!selectedProduct) {
       toast('No product selected');
@@ -97,11 +151,19 @@ export function GRNPanel({ user }) {
     const cost = Math.max(0, lineCost || selectedProduct.cost || 0);
     const sell = Math.max(0, lineSell || selectedProduct.sell || 0);
 
+    console.log('📝 Confirming add line:', {
+      product: selectedProduct.name,
+      qty,
+      cost,
+      sell,
+      total: qty * cost
+    });
+
     setLines(prev => {
       const existing = prev.find(l => l.id === selectedProduct.id);
       
       if (existing) {
-        return prev.map(l => 
+        const updated = prev.map(l => 
           l.id === selectedProduct.id
             ? { 
                 ...l, 
@@ -112,19 +174,24 @@ export function GRNPanel({ user }) {
               }
             : l
         );
+        console.log('📦 Updated existing line:', updated);
+        return updated;
       }
       
-      return [...prev, {
+      const newLine = {
         id: selectedProduct.id,
         name: selectedProduct.name,
         code: selectedProduct.code || '',
-        qty,
+        qty: qty,
         costPrice: cost,
         sellPrice: sell,
         total: qty * cost,
         brand: selectedProduct.brand || '',
         model: selectedProduct.model || '',
-      }];
+        supplier_id: selectedProduct.supplier_id || selectedProduct.supplierId || supplier,
+      };
+      console.log('📦 New line added:', newLine);
+      return [...prev, newLine];
     });
 
     setShowAddLineModal(false);
@@ -134,113 +201,225 @@ export function GRNPanel({ user }) {
     toast(`✅ Added ${qty}×${selectedProduct.name}`);
   };
 
-  const createAndAdd = () => {
+  const createAndAdd = async () => {
     if (!newProd.name || !newProd.code || !newProd.cost) {
-      toast('Name, Code, Cost required'); return;
+      toast('Name, Code, Cost required'); 
+      return;
     }
     if (!supplier) {
-      toast('Please select a supplier first'); return;
+      toast('Please select a supplier first'); 
+      return;
     }
     
-    const sup = suppliers.find(s => s.id === supplier);
+    const suppliersArray = Array.isArray(suppliers) ? suppliers : [];
+    const productsArray = Array.isArray(products) ? products : [];
+    const sup = suppliersArray.find(s => s.id === supplier);
     
     const p = {
-      id: products.length ? Math.max(...products.map(x => x.id)) + 1 : 1,
+      id: productsArray.length ? Math.max(...productsArray.map(x => x.id)) + 1 : 1,
       ...newProd,
-      supplierId: supplier,
-      supplierName: sup?.name || '',
+      supplier_id: supplier,
+      supplier_name: sup?.name || '',
       compatible: newProd.compatible ? newProd.compatible.split(',').map(s => s.trim()).filter(s => s) : [],
       margin: (((newProd.sell - newProd.cost) / newProd.cost) * 100).toFixed(1),
-      stock: 0, active: true, reorderLevel: 5,
-      supplierWarranty: newProd.supplierWarranty || 'NO WARRANTY',
-      customerWarranty: newProd.customerWarranty || 'NO WARRANTY',
+      stock: 0, 
+      active: true, 
+      reorder_level: 5,
+      supplier_warranty: newProd.supplierWarranty || 'NO WARRANTY',
+      customer_warranty: newProd.customerWarranty || 'NO WARRANTY',
     };
-    const updated = [...products, p];
-    save(SK.PRODUCTS, updated);
-    setProducts(updated);
-    setShowModal(false);
-    // Open add line modal for the new product
-    setSelectedProduct(p);
-    setLineQty(1);
-    setLineCost(p.cost || 0);
-    setLineSell(p.sell || 0);
-    setShowAddLineModal(true);
+    
+    try {
+      await window.api.createProduct(p);
+      await refreshAllData();
+      
+      setShowModal(false);
+      
+      setSelectedProduct(p);
+      setLineQty(1);
+      setLineCost(p.cost || 0);
+      setLineSell(p.sell || 0);
+      setShowAddLineModal(true);
+    } catch (error) {
+      console.error('Error creating product:', error);
+      toast('Error creating product');
+    }
   };
 
   // ── SAVE GRN ──────────────────────────────────────────────
 
-  const saveGRN = () => {
-    if (!supplier) { toast('Select supplier'); return; }
-    if (!lines.length) { toast('Add products'); return; }
+  const saveGRN = async () => {
+    console.log('💾 saveGRN called');
+    console.log('📋 Current lines state:', lines);
+    
+    if (!supplier) { 
+      toast('Select supplier'); 
+      return; 
+    }
+    if (!lines.length) { 
+      toast('Add products'); 
+      return; 
+    }
 
-    const sup = suppliers.find(s => s.id === supplier);
-    const sub = lines.reduce((s, l) => s + l.total, 0);
-    const grnId = nextGRN();
+    const suppliersArray = Array.isArray(suppliers) ? suppliers : [];
+    const productsArray = Array.isArray(products) ? products : [];
+    const grnsArray = Array.isArray(grns) ? grns : [];
+    
+    const sup = suppliersArray.find(s => s.id === supplier);
+    if (!sup) {
+      toast('Selected supplier not found');
+      return;
+    }
+    
+    const sub = lines.reduce((s, l) => {
+      const total = (l.qty || 0) * (l.costPrice || 0);
+      console.log(`📊 Line ${l.name}: qty=${l.qty}, cost=${l.costPrice}, total=${total}`);
+      return s + total;
+    }, 0);
+    
+    console.log('💰 Subtotal calculated:', sub);
+    
+    const grnId = padId(grnsArray, 'PUR');
     const grnSeqNum = parseInt(grnId.replace(/\D/g, '')) || 0;
 
-    const linesWithBarcodes = lines.map((l, i) => ({
-      ...l,
-      barcodeNum: genBarcodeNumber(l.id, grnSeqNum, i),
-      encryptedCost: encryptCost(l.costPrice),
-    }));
+    const linesWithBarcodes = lines.map((l, i) => {
+      const qty = Number(l.qty) || 0;
+      const costPrice = Number(l.costPrice) || 0;
+      const sellPrice = Number(l.sellPrice) || 0;
+      const total = qty * costPrice;
+      
+      return {
+        id: l.id,
+        name: l.name || 'Unknown',
+        code: l.code || '',
+        qty: qty,
+        costPrice: costPrice,
+        sellPrice: sellPrice,
+        total: total,
+        brand: l.brand || '',
+        model: l.model || '',
+        supplier_id: l.supplier_id || supplier,
+        barcodeNum: genBarcodeNumber(l.id, grnSeqNum, i),
+        encryptedCost: encryptCost(costPrice),
+        product_id: l.id,
+      };
+    });
+
+    console.log('📦 Lines with barcodes:', linesWithBarcodes);
 
     const grn = {
       id: grnId,
-      supplierId: supplier,
-      supplierName: sup?.name || '',
-      billNo, billType, date,
-      lines: linesWithBarcodes,
-      subTotal: sub,
-      discount: +discount,
-      netTotal: sub - discount,
-      amtPaid: +paid,
-      settled,
-      createdBy: user?.username || 'ADMIN',
+      supplier_id: supplier,
+      supplier_name: sup?.name || '',
+      bill_no: billNo || '',
+      bill_type: billType || 'CASH',
+      date: date || new Date().toISOString().slice(0, 10),
+      sub_total: sub,
+      discount: Number(discount) || 0,
+      net_total: sub - (Number(discount) || 0),
+      amt_paid: Number(paid) || 0,
+      settled: settled !== false ? 1 : 0,
+      created_by: user?.username || 'ADMIN',
+      lines: linesWithBarcodes.map(l => ({
+        product_id: l.id,
+        name: l.name,
+        code: l.code || '',
+        qty: l.qty,
+        cost_price: l.costPrice,
+        sell_price: l.sellPrice,
+        total: l.total,
+        brand: l.brand || '',
+        model: l.model || '',
+        barcode_num: l.barcodeNum || '',
+        encrypted_cost: l.encryptedCost || '',
+      }))
     };
 
-    const updGrns = [...grns, grn];
-    setGrns(updGrns);
-    save(SK.GRNS, updGrns);
+    console.log('💾 Saving GRN with data:', JSON.stringify(grn, null, 2));
 
-    const updProds = products.map(p => {
-      const l = linesWithBarcodes.find(x => x.id === p.id);
-      if (!l) return p;
-      return {
-        ...p,
-        stock: p.stock + l.qty,
-        cost: l.costPrice,
-        sell: l.sellPrice,
-        active: true,
-        barcode: l.barcodeNum,
-        margin: (((l.sellPrice - l.costPrice) / l.costPrice) * 100).toFixed(1),
-      };
-    });
-    save(SK.PRODUCTS, updProds);
-    setProducts(updProds);
+    try {
+      await window.api.createGRN(grn);
+      
+      const updProds = productsArray.map(p => {
+        const l = linesWithBarcodes.find(x => x.id === p.id);
+        if (!l) return p;
+        return {
+          ...p,
+          stock: (p.stock || 0) + l.qty,
+          cost: l.costPrice,
+          sell: l.sellPrice,
+          active: true,
+          barcode: l.barcodeNum,
+          margin: l.sellPrice && l.costPrice ? (((l.sellPrice - l.costPrice) / l.costPrice) * 100).toFixed(1) : p.margin,
+        };
+      });
+      
+      for (const product of updProds) {
+        if (product.id) {
+          await window.api.updateProduct(product.id, product);
+        }
+      }
+      
+      await refreshAllData();
 
-    toast(`✅ ${grnId} saved — opening barcode print`);
+      toast(`✅ ${grnId} saved — opening barcode print`);
 
-    setBarcodesToPrint(linesWithBarcodes);
-    setSavedGrnId(grnId);
-    setShowBarcodeModal(true);
+      setBarcodesToPrint(linesWithBarcodes);
+      setSavedGrnId(grnId);
+      setShowBarcodeModal(true);
 
-    setLines([]); setSearch(''); setBillNo(''); setPaid(0); setDiscount(0);
+      setLines([]); 
+      setSearch(''); 
+      setBillNo(''); 
+      setPaid(0); 
+      setDiscount(0);
+    } catch (error) {
+      console.error('Error saving GRN:', error);
+      toast('Error saving GRN: ' + (error.message || 'Unknown error'));
+    }
   };
 
   // ── Derived values ────────────────────────────────────────
 
-  const sub = lines.reduce((s, l) => s + l.total, 0);
+  const sub = lines.reduce((s, l) => s + ((l.qty || 0) * (l.costPrice || 0)), 0);
   const balance = Math.max(0, sub - discount - paid);
-  const filtered = [...grns].reverse().filter(g =>
+  
+  const grnsArray = Array.isArray(grns) ? grns : [];
+  const filtered = [...grnsArray].reverse().filter(g =>
     !histSearch ||
-    g.id.toLowerCase().includes(histSearch.toLowerCase()) ||
-    g.supplierName.toLowerCase().includes(histSearch.toLowerCase())
+    g.id?.toLowerCase().includes(histSearch.toLowerCase()) ||
+    g.supplierName?.toLowerCase().includes(histSearch.toLowerCase())
   );
+
+  // ── Loading state ──────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <GlassCard title="📋 Purchase GRN" badge="Loading...">
+        <div style={{ textAlign: 'center', padding: '40px' }}>
+          <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+          <div>Loading data...</div>
+        </div>
+      </GlassCard>
+    );
+  }
 
   // ── Render ────────────────────────────────────────────────
 
   return (
     <div>
+      {/* ── Refresh Button ─────────────────────────────────── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10, alignItems: 'center' }}>
+        <div style={{ fontSize: 12, color: '#64748b' }}>
+          Total Products: {Array.isArray(products) ? products.length : 0}
+        </div>
+        <button 
+          onClick={refreshAllData}
+          style={{ ...styles.btnOutline, padding: '6px 16px', fontSize: 12 }}
+        >
+          🔄 Refresh Data
+        </button>
+      </div>
 
       {/* ── Purchase GRN Header ───────────────────────────── */}
       <GlassCard title="📋 Purchase GRN" badge={nextGRN()}>
@@ -252,6 +431,7 @@ export function GRNPanel({ user }) {
                 <select style={styles.input} value={supplier} onChange={e => {
                   setSupplier(e.target.value);
                   setSuggestions([]);
+                  setSearch('');
                 }}>
                   <option value="">-- Select --</option>
                   {suppliers.filter(s => s.active !== false).map(s =>
@@ -286,6 +466,11 @@ export function GRNPanel({ user }) {
               {!supplier && (
                 <div style={{ color: '#ef4444', fontSize: 12, marginTop: 4 }}>
                   ⚠️ Please select a supplier to search products
+                </div>
+              )}
+              {supplier && products.length === 0 && (
+                <div style={{ color: '#f59e0b', fontSize: 12, marginTop: 4 }}>
+                  ⚠️ No products found for this supplier. Please add products in Product Catalog.
                 </div>
               )}
               {suggestions.length > 0 && (
@@ -402,37 +587,74 @@ export function GRNPanel({ user }) {
                 <td style={styles.td}>
                   <input
                     style={{ ...styles.input, width: 70 }}
-                    type="number" value={l.qty} min={1}
+                    type="number" 
+                    value={l.qty || ''} 
+                    min={1}
+                    placeholder="0"
                     onChange={e => {
-                      const q = +e.target.value || 1;
-                      setLines(prev => prev.map(x =>
-                        x.id === l.id ? { ...x, qty: q, total: q * x.costPrice } : x
-                      ));
+                      const val = e.target.value;
+                      if (val === '') {
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, qty: 0, total: 0 } : x
+                        ));
+                      } else {
+                        const q = parseInt(val) || 1;
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, qty: q, total: q * x.costPrice } : x
+                        ));
+                      }
                     }}
+                    onFocus={e => e.target.select()}
                   />
                 </td>
                 <td style={styles.td}>
                   <input
                     style={{ ...styles.input, width: 95 }}
-                    type="number" value={l.costPrice}
+                    type="number" 
+                    value={l.costPrice || ''} 
+                    placeholder="0.00"
+                    step="0.01"
+                    min={0}
                     onChange={e => {
-                      const c = +e.target.value;
-                      setLines(prev => prev.map(x =>
-                        x.id === l.id ? { ...x, costPrice: c, total: x.qty * c } : x
-                      ));
+                      const val = e.target.value;
+                      if (val === '') {
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, costPrice: 0, total: 0 } : x
+                        ));
+                      } else {
+                        const c = parseFloat(val) || 0;
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, costPrice: c, total: x.qty * c } : x
+                        ));
+                      }
                     }}
+                    onFocus={e => e.target.select()}
                   />
                 </td>
                 <td style={styles.td}>
                   <input
                     style={{ ...styles.input, width: 95 }}
-                    type="number" value={l.sellPrice}
-                    onChange={e => setLines(prev => prev.map(x =>
-                      x.id === l.id ? { ...x, sellPrice: +e.target.value } : x
-                    ))}
+                    type="number" 
+                    value={l.sellPrice || ''} 
+                    placeholder="0.00"
+                    step="0.01"
+                    min={0}
+                    onChange={e => {
+                      const val = e.target.value;
+                      if (val === '') {
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, sellPrice: 0 } : x
+                        ));
+                      } else {
+                        setLines(prev => prev.map(x =>
+                          x.id === l.id ? { ...x, sellPrice: parseFloat(val) || 0 } : x
+                        ));
+                      }
+                    }}
+                    onFocus={e => e.target.select()}
                   />
                 </td>
-                <td style={styles.td}>LKR {l.total.toLocaleString()}</td>
+                <td style={styles.td}>LKR {((l.qty || 0) * (l.costPrice || 0)).toLocaleString()}</td>
                 <td style={styles.td}>
                   <button style={styles.btnDanger}
                     onClick={() => setLines(prev => prev.filter(x => x.id !== l.id))}>
@@ -447,7 +669,7 @@ export function GRNPanel({ user }) {
           display: 'flex', justifyContent: 'flex-end', gap: 24,
           marginTop: 12, borderTop: '1px solid #e2e8f0', paddingTop: 12,
         }}>
-          <span>Total Qty: <strong>{lines.reduce((s, l) => s + l.qty, 0)}</strong></span>
+          <span>Total Qty: <strong>{lines.reduce((s, l) => s + (l.qty || 0), 0)}</strong></span>
           <span>Subtotal: <strong>LKR {sub.toLocaleString()}</strong></span>
         </div>
       </GlassCard>
@@ -456,12 +678,22 @@ export function GRNPanel({ user }) {
       <GlassCard title="💰 Payment">
         <FormGrid cols={4}>
           <Field label="Discount">
-            <input type="number" style={styles.input} value={discount}
-              onChange={e => setDiscount(+e.target.value)} />
+            <input 
+              type="number" 
+              style={styles.input} 
+              value={discount || ''} 
+              placeholder="0"
+              onChange={e => setDiscount(parseFloat(e.target.value) || 0)} 
+            />
           </Field>
           <Field label="Paid (LKR)">
-            <input type="number" style={styles.input} value={paid}
-              onChange={e => setPaid(+e.target.value)} />
+            <input 
+              type="number" 
+              style={styles.input} 
+              value={paid || ''} 
+              placeholder="0"
+              onChange={e => setPaid(parseFloat(e.target.value) || 0)} 
+            />
           </Field>
           <Field label="Balance">
             <input style={{ ...styles.input, color: '#ef4444', fontWeight: 700 }}
@@ -499,8 +731,8 @@ export function GRNPanel({ user }) {
               <strong>{g.id}</strong> | {g.date} | 🏢 {g.supplierName}
             </div>
             <div>
-              LKR {g.subTotal.toLocaleString()} |&nbsp;
-              {g.lines.reduce((s, l) => s + l.qty, 0)} units
+              LKR {g.subTotal?.toLocaleString() || 0} |&nbsp;
+              {g.lines?.reduce((s, l) => s + l.qty, 0) || 0} units
             </div>
           </div>
         ))}
@@ -526,16 +758,16 @@ export function GRNPanel({ user }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {selectedGrn.lines.map(line => (
-                    <tr key={line.id}>
+                  {selectedGrn.lines?.map(line => (
+                    <tr key={line.product_id || line.id}>
                       <td style={styles.td}>{line.name}</td>
                       <td style={styles.td}>{line.qty}</td>
-                      <td style={styles.td}>LKR {line.costPrice}</td>
-                      <td style={styles.td}>LKR {line.sellPrice}</td>
-                      <td style={styles.td}>LKR {line.total.toLocaleString()}</td>
-                      <td style={styles.td}><small>{line.barcodeNum || '—'}</small></td>
+                      <td style={styles.td}>LKR {line.cost_price || line.costPrice}</td>
+                      <td style={styles.td}>LKR {line.sell_price || line.sellPrice}</td>
+                      <td style={styles.td}>LKR {(line.total || (line.qty * line.cost_price)).toLocaleString()}</td>
+                      <td style={styles.td}><small>{line.barcode_num || line.barcodeNum || '—'}</small></td>
                       <td style={{ ...styles.td, fontWeight: 700, color: '#16a34a' }}>
-                        {line.encryptedCost || encryptCost(line.costPrice)}
+                        {line.encrypted_cost || line.encryptedCost || encryptCost(line.cost_price || line.costPrice || 0)}
                       </td>
                     </tr>
                   ))}
@@ -546,18 +778,19 @@ export function GRNPanel({ user }) {
               display: 'flex', justifyContent: 'space-between',
               marginTop: 16, fontWeight: 700,
             }}>
-              <span>Total units: {selectedGrn.lines.reduce((s, l) => s + l.qty, 0)}</span>
-              <span>Subtotal: LKR {selectedGrn.subTotal.toLocaleString()}</span>
+              <span>Total units: {selectedGrn.lines?.reduce((s, l) => s + (l.qty || 0), 0) || 0}</span>
+              <span>Subtotal: LKR {(selectedGrn.sub_total || selectedGrn.subTotal || 0).toLocaleString()}</span>
             </div>
             <div style={{ marginTop: 12, display: 'flex', gap: 10 }}>
               <button
                 style={styles.btnPrimary}
                 onClick={() => {
                   const grnSeqNum = parseInt(selectedGrn.id.replace(/\D/g, '')) || 0;
-                  setBarcodesToPrint(selectedGrn.lines.map((l, i) => ({
+                  setBarcodesToPrint((selectedGrn.lines || []).map((l, i) => ({
                     ...l,
-                    barcodeNum: l.barcodeNum || genBarcodeNumber(l.id, grnSeqNum, i),
-                    encryptedCost: l.encryptedCost || encryptCost(l.costPrice),
+                    id: l.product_id || l.id,
+                    barcodeNum: l.barcode_num || l.barcodeNum || genBarcodeNumber(l.product_id || l.id, grnSeqNum, i),
+                    encryptedCost: l.encrypted_cost || l.encryptedCost || encryptCost(l.cost_price || l.costPrice || 0),
                   })));
                   setSavedGrnId(selectedGrn.id);
                   setSelectedGrn(null);
@@ -611,16 +844,16 @@ export function GRNPanel({ user }) {
               </select>
             </Field>
             <Field label="Purchase Cost">
-              <input type="number" style={styles.input} value={newProd.cost}
-                onChange={e => setNewProd(n => ({ ...n, cost: +e.target.value }))} />
+              <input type="number" style={styles.input} value={newProd.cost || ''} placeholder="0"
+                onChange={e => setNewProd(n => ({ ...n, cost: parseFloat(e.target.value) || 0 }))} />
             </Field>
             <Field label="Selling Price">
-              <input type="number" style={styles.input} value={newProd.sell}
-                onChange={e => setNewProd(n => ({ ...n, sell: +e.target.value }))} />
+              <input type="number" style={styles.input} value={newProd.sell || ''} placeholder="0"
+                onChange={e => setNewProd(n => ({ ...n, sell: parseFloat(e.target.value) || 0 }))} />
             </Field>
             <Field label="Initial Stock">
-              <input type="number" style={styles.input} value={newProd.stock}
-                onChange={e => setNewProd(n => ({ ...n, stock: +e.target.value }))} />
+              <input type="number" style={styles.input} value={newProd.stock || ''} placeholder="0"
+                onChange={e => setNewProd(n => ({ ...n, stock: parseInt(e.target.value) || 0 }))} />
             </Field>
             <Field label="Storage Location">
               <input style={styles.input} value={newProd.storage || ''}
@@ -667,7 +900,7 @@ export function GRNPanel({ user }) {
         </Modal>
       )}
 
-      {/* ── Add Line Modal (REPLACES prompt()) ────────────── */}
+      {/* ── Add Line Modal ────────────────────────────── */}
       {showAddLineModal && selectedProduct && (
         <Modal 
           title={`Add ${selectedProduct.name} to GRN`} 
@@ -688,7 +921,8 @@ export function GRNPanel({ user }) {
                 <input 
                   type="number" 
                   style={styles.input} 
-                  value={lineQty} 
+                  value={lineQty || ''} 
+                  placeholder="1"
                   min={1}
                   onChange={e => setLineQty(parseInt(e.target.value) || 1)} 
                 />
@@ -697,7 +931,8 @@ export function GRNPanel({ user }) {
                 <input 
                   type="number" 
                   style={styles.input} 
-                  value={lineCost} 
+                  value={lineCost || ''} 
+                  placeholder="0.00"
                   min={0}
                   step={0.01}
                   onChange={e => setLineCost(parseFloat(e.target.value) || 0)} 
@@ -707,7 +942,8 @@ export function GRNPanel({ user }) {
                 <input 
                   type="number" 
                   style={styles.input} 
-                  value={lineSell} 
+                  value={lineSell || ''} 
+                  placeholder="0.00"
                   min={0}
                   step={0.01}
                   onChange={e => setLineSell(parseFloat(e.target.value) || 0)} 

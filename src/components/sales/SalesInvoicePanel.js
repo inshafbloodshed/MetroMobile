@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { load, save, toast } from '../../utils/storage';
-import { SK } from '../../utils/constants';
+// src/components/inventory/SalesInvoicePanel.js
+import React, { useState, useEffect, useRef } from 'react';
+import { load, save, toast, SK } from '../../utils/storage';
 import { padId } from '../../utils/helpers';
 import { styles } from '../../utils/styles';
 import { GlassCard } from '../common/GlassCard';
@@ -8,11 +8,14 @@ import { Modal } from '../common/Modal';
 import { Field } from '../common/Field';
 import { FormGrid } from '../common/FormGrid';
 
-export function SalesInvoicePanel({ user }) {
-  const [products, setProducts] = useState(() => load(SK.PRODUCTS, []));
-  const [sales, setSales] = useState(() => load(SK.SALES, []));
-  const [customers, setCustomers] = useState(() => load(SK.CUSTOMERS, []) || []);
-  const [credits, setCredits] = useState(() => load(SK.CREDITS, []));
+export function SalesInvoicePanel({ user, isWorkerView = false }) {
+  // State for data - initialize as empty arrays
+  const [products, setProducts] = useState([]);
+  const [sales, setSales] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [credits, setCredits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
   const [cart, setCart] = useState([]);
   const [custName, setCustName] = useState('');
   const [mobile, setMobile] = useState('');
@@ -34,6 +37,9 @@ export function SalesInvoicePanel({ user }) {
   const [viewMode, setViewMode] = useState('all');
   const [customerPendingInvoices, setCustomerPendingInvoices] = useState([]);
   const [showCreditDetails, setShowCreditDetails] = useState(false);
+  const [invId, setInvId] = useState('INV00001');
+  const [customerInvoiceHistory, setCustomerInvoiceHistory] = useState([]);
+  const [showCustomerHistory, setShowCustomerHistory] = useState(false);
   
   // Payment Modal states
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -42,21 +48,102 @@ export function SalesInvoicePanel({ user }) {
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [paymentRef, setPaymentRef] = useState('');
 
-  const nextInv = () => padId(sales, 'INV', 5);
-  const [invId, setInvId] = useState(() => padId(load(SK.SALES, []), 'INV', 5));
+  const printContainerRef = useRef(null);
 
-  const sub = cart.reduce((s, i) => s + i.qty * i.price, 0);
-  const payable = Math.max(0, sub - discount);
-  const paid = amtPaid === '' ? payable : +amtPaid;
+  // ── Load data on component mount ──────────────────────────
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        setLoading(true);
+        
+        let productsData = [];
+        let salesData = [];
+        let customersData = [];
+        let creditsData = [];
+        
+        if (window.api) {
+          try {
+            productsData = await window.api.getProducts() || [];
+            salesData = await window.api.getSalesInvoices() || [];
+            customersData = await window.api.getCustomers ? await window.api.getCustomers() : [];
+            creditsData = await window.api.getCredits ? await window.api.getCredits() : [];
+          } catch (sqliteError) {
+            console.warn('SQLite error, falling back to localStorage:', sqliteError);
+            productsData = await load(SK.PRODUCTS, []);
+            salesData = await load(SK.SALES, []);
+            customersData = await load(SK.CUSTOMERS, []);
+            creditsData = await load(SK.CREDITS, []);
+          }
+        } else {
+          productsData = await load(SK.PRODUCTS, []);
+          salesData = await load(SK.SALES, []);
+          customersData = await load(SK.CUSTOMERS, []);
+          creditsData = await load(SK.CREDITS, []);
+        }
+        
+        setProducts(productsData || []);
+        setSales(salesData || []);
+        setCustomers(customersData || []);
+        setCredits(creditsData || []);
+        
+        // Generate unique invoice ID
+        const salesArray = salesData || [];
+        setInvId(generateInvoiceId(salesArray));
+      } catch (error) {
+        console.error('Error loading data:', error);
+        toast('Error loading data');
+        setProducts([]);
+        setSales([]);
+        setCustomers([]);
+        setCredits([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
+  }, []);
+
+  // ── Helper Functions ──────────────────────────────────────
+
+  const generateInvoiceId = (salesArray) => {
+    if (!salesArray || salesArray.length === 0) return 'INV00001';
+    let maxNum = 0;
+    for (const sale of salesArray) {
+      if (sale.id) {
+        const num = parseInt(sale.id.replace('INV', ''));
+        if (!isNaN(num) && num > maxNum) {
+          maxNum = num;
+        }
+      }
+    }
+    return `INV${String(maxNum + 1).padStart(5, '0')}`;
+  };
+
+  const isIdExists = (id, salesArray) => {
+    return salesArray.some(sale => sale.id === id);
+  };
+
+  // ── Derived values ──────────────────────────────────────
+
+  const productsArray = Array.isArray(products) ? products : [];
+  const salesArray = Array.isArray(sales) ? sales : [];
+  const customersArray = Array.isArray(customers) ? customers : [];
+  const creditsArray = Array.isArray(credits) ? credits : [];
+
+  const sub = cart.reduce((s, i) => s + (i.qty || 0) * (i.price || 0), 0);
+  const payable = Math.max(0, sub - (discount || 0));
+  const paid = amtPaid === '' ? payable : +(amtPaid || 0);
   const due = Math.max(0, payable - paid);
   const change = Math.max(0, paid - payable);
 
+  // ── Helper functions ──────────────────────────────────────
+
   const getCustomerTotalDue = (customerName) => {
-    const customerInvoices = sales.filter(sale =>
+    const customerInvoices = salesArray.filter(sale =>
       sale.customer?.toLowerCase() === customerName?.toLowerCase() &&
-      sale.due > 0
+      (sale.due || 0) > 0
     );
-    const totalDue = customerInvoices.reduce((sum, inv) => sum + inv.due, 0);
+    const totalDue = customerInvoices.reduce((sum, inv) => sum + (inv.due || 0), 0);
     return { totalDue, invoices: customerInvoices };
   };
 
@@ -70,13 +157,95 @@ export function SalesInvoicePanel({ user }) {
     return 0;
   };
 
-  const filteredProds = products.filter(p => p.active !== false && p.stock > 0 &&
-    (p.name.toLowerCase().includes(prodSearch.toLowerCase()) || (p.code || '').toLowerCase().includes(prodSearch.toLowerCase())));
+  // ── Load customer invoice history ──────────────────────────
+  const loadCustomerHistory = (customerName) => {
+    if (!customerName || !customerName.trim()) {
+      toast('Please enter a customer name first');
+      return;
+    }
+    
+    const customerInvoices = salesArray.filter(sale =>
+      sale.customer?.toLowerCase() === customerName.toLowerCase()
+    );
+    
+    setCustomerInvoiceHistory(customerInvoices);
+    setShowCustomerHistory(true);
+    
+    if (customerInvoices.length === 0) {
+      toast(`No previous invoices found for ${customerName}`);
+    } else {
+      toast(`📋 Found ${customerInvoices.length} invoice(s) for ${customerName}`);
+    }
+  };
+
+  const loadInvoiceData = async (invoiceId) => {
+    try {
+      const inv = salesArray.find(i => i.id === invoiceId);
+      if (!inv) { 
+        toast('❌ Invoice not found!'); 
+        return; 
+      }
+      
+      setEditInvId(inv.id);
+      setInvId(inv.id);
+      setCustName(inv.customer);
+      setMobile(inv.mobile || '');
+      setAddress(inv.address || '');
+      setInvDate(inv.date || new Date().toISOString().slice(0, 10));
+      setDiscount(inv.discount || 0);
+      setAmtPaid(inv.paid || '');
+      setMethod(inv.method || 'Cash');
+      setReference(inv.reference || '');
+      setRemarks(inv.remarks || '');
+      
+      // Load cart items
+      const cartItems = inv.lines.map(l => ({
+        id: l.product_id,
+        name: l.product_name,
+        qty: l.qty,
+        price: l.sell_price || l.price || 0
+      }));
+      setCart(cartItems);
+      
+      updateCustomerPending(inv.customer);
+      if (inv.due > 0) setShowCreditDetails(true);
+      
+      // Load customer history
+      loadCustomerHistory(inv.customer);
+      
+      toast(`✅ Loaded invoice ${inv.id} for editing`);
+    } catch (error) {
+      console.error('Error loading invoice:', error);
+      toast('Error loading invoice');
+    }
+  };
+
+  const loadInvoiceByNumber = () => {
+    const invoiceId = window.prompt('Enter Invoice ID to load (e.g., INV00001):');
+    if (!invoiceId) return;
+    
+    const formattedId = invoiceId.toUpperCase().trim();
+    if (!formattedId.startsWith('INV')) {
+      toast('⚠️ Please enter a valid Invoice ID starting with INV');
+      return;
+    }
+    
+    loadInvoiceData(formattedId);
+  };
+
+  const filteredProds = productsArray.filter(p => 
+    p.active !== false && 
+    (p.stock || 0) > 0 &&
+    (p.name?.toLowerCase().includes(prodSearch.toLowerCase()) || 
+     (p.code || '').toLowerCase().includes(prodSearch.toLowerCase()))
+  );
 
   const addToCart = (p) => {
     setCart(prev => { 
       const ex = prev.find(i => i.id === p.id); 
-      if (ex) return prev.map(i => i.id === p.id ? { ...i, qty: Math.min(i.qty + 1, p.stock) } : i); 
+      if (ex) {
+        return prev.map(i => i.id === p.id ? { ...i, qty: Math.min((i.qty || 0) + 1, p.stock || 0) } : i);
+      }
       return [...prev, { id: p.id, name: p.name, qty: 1, price: p.sell }]; 
     });
   };
@@ -87,9 +256,11 @@ export function SalesInvoicePanel({ user }) {
       setCustSugg([]);
       setCustomerPendingInvoices([]);
       setShowCreditDetails(false);
+      setCustomerInvoiceHistory([]);
+      setShowCustomerHistory(false);
       return;
     }
-    const filtered = customers.filter(c => c.name?.toLowerCase().includes(val.toLowerCase()));
+    const filtered = customersArray.filter(c => c.name?.toLowerCase().includes(val.toLowerCase()));
     setCustSugg(filtered);
     const totalDue = updateCustomerPending(val);
     if (totalDue > 0) {
@@ -107,9 +278,10 @@ export function SalesInvoicePanel({ user }) {
     if (totalDue > 0) {
       setShowCreditDetails(true);
     }
+    // Load customer history
+    loadCustomerHistory(customer.name);
   };
 
-  // UPDATED: Opens modal instead of prompt()
   const openPaymentModal = (creditRecord) => {
     setSelectedCredit(creditRecord);
     setPaymentAmount('');
@@ -118,15 +290,15 @@ export function SalesInvoicePanel({ user }) {
     setShowPaymentModal(true);
   };
 
-  const confirmPayment = () => {
+  const confirmPayment = async () => {
     if (!selectedCredit) return;
     const amount = parseFloat(paymentAmount);
-    if (isNaN(amount) || amount <= 0 || amount > selectedCredit.balance) {
+    if (isNaN(amount) || amount <= 0 || amount > (selectedCredit.balance || 0)) {
       toast('Invalid payment amount');
       return;
     }
 
-    const newBalance = selectedCredit.balance - amount;
+    const newBalance = (selectedCredit.balance || 0) - amount;
     const payment = {
       date: new Date().toISOString().slice(0, 10),
       amount: amount,
@@ -136,20 +308,30 @@ export function SalesInvoicePanel({ user }) {
 
     const updatedCredit = {
       ...selectedCredit,
-      paidAmount: selectedCredit.paidAmount + amount,
+      paidAmount: (selectedCredit.paidAmount || 0) + amount,
       balance: newBalance,
       status: newBalance === 0 ? 'paid' : 'pending',
-      payments: [...selectedCredit.payments, payment]
+      payments: [...(selectedCredit.payments || []), payment]
     };
 
-    const updatedCredits = credits.map(c => c.id === selectedCredit.id ? updatedCredit : c);
+    let updatedCredits = creditsArray.map(c => c.id === selectedCredit.id ? updatedCredit : c);
     setCredits(updatedCredits);
-    save(SK.CREDITS, updatedCredits);
+    
+    try {
+      if (window.api && window.api.updateCredit) {
+        await window.api.updateCredit(updatedCredit);
+      } else {
+        await save(SK.CREDITS, updatedCredits);
+      }
+    } catch (e) {
+      console.warn('Error saving to SQLite, falling back to localStorage:', e);
+      await save(SK.CREDITS, updatedCredits);
+    }
 
-    const updatedSales = sales.map(sale => {
+    const updatedSales = salesArray.map(sale => {
       if (sale.id === selectedCredit.invoiceId) {
-        const newPaid = sale.paid + amount;
-        const newDue = sale.due - amount;
+        const newPaid = (sale.paid || 0) + amount;
+        const newDue = (sale.due || 0) - amount;
         return {
           ...sale,
           paid: newPaid,
@@ -160,7 +342,22 @@ export function SalesInvoicePanel({ user }) {
       return sale;
     });
     setSales(updatedSales);
-    save(SK.SALES, updatedSales);
+    
+    try {
+      if (window.api && window.api.updateSalesInvoice) {
+        for (const sale of updatedSales) {
+          if (sale.id === selectedCredit.invoiceId) {
+            await window.api.updateSalesInvoice(sale.id, sale);
+            break;
+          }
+        }
+      } else {
+        await save(SK.SALES, updatedSales);
+      }
+    } catch (e) {
+      console.warn('Error saving to SQLite, falling back to localStorage:', e);
+      await save(SK.SALES, updatedSales);
+    }
 
     toast(`✅ Payment recorded! Remaining balance: LKR ${newBalance.toFixed(2)}`);
     setShowPaymentModal(false);
@@ -171,17 +368,12 @@ export function SalesInvoicePanel({ user }) {
     }
   };
 
-  const printReceipt = (invoice) => {
-    if (!invoice) {
-      toast('No invoice to print. Please save the invoice first.');
-      return;
-    }
-
-    const printWindow = window.open('', '_blank');
+  // ── GENERATE RECEIPT HTML ──────────────────────────────────
+  const generateReceiptHTML = (invoice) => {
     const currentDate = new Date();
     const formattedDateTime = `${currentDate.getDate().toString().padStart(2, '0')}-${(currentDate.getMonth() + 1).toString().padStart(2, '0')}-${currentDate.getFullYear()} ${currentDate.getHours().toString().padStart(2, '0')}:${currentDate.getMinutes().toString().padStart(2, '0')}:${currentDate.getSeconds().toString().padStart(2, '0')}`;
 
-    const receiptHTML = `
+    return `
       <!DOCTYPE html>
       <html>
       <head>
@@ -189,8 +381,8 @@ export function SalesInvoicePanel({ user }) {
         <title>Invoice ${invoice.id}</title>
         <style>
           * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.3; margin: 0; padding: 8px; background: white; color: black; }
-          .receipt { width: 100%; max-width: 80mm; margin: 0 auto; background: white; }
+          body { font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.3; margin: 0; padding: 20px; background: white; color: black; display: flex; justify-content: center; }
+          .receipt { width: 80mm; background: white; padding: 10px; }
           .header { text-align: center; border-bottom: 1px dashed #000; padding-bottom: 6px; margin-bottom: 6px; }
           .shop-name { font-size: 16px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
           .shop-tagline { font-size: 9px; color: #333; }
@@ -212,7 +404,7 @@ export function SalesInvoicePanel({ user }) {
           .return-policy { font-size: 8px; margin-top: 6px; text-align: center; color: #555; }
           .thankyou { text-align: center; margin-top: 6px; font-weight: bold; font-size: 11px; }
           .system-info { font-size: 7px; margin-top: 4px; text-align: center; color: #666; }
-          @media print { body { margin: 0; padding: 0; } .no-print { display: none; } }
+          @media print { body { margin: 0; padding: 0; } .no-print { display: none; } .receipt { margin: 0; } }
           .text-center { text-align: center; }
           .text-right { text-align: right; }
           .bold { font-weight: bold; }
@@ -240,19 +432,19 @@ export function SalesInvoicePanel({ user }) {
           <table class="items-table">
             <thead><tr><th>Product</th><th>Qty</th><th>Price</th><th>Amount</th></tr></thead>
             <tbody>
-              ${invoice.lines.map(item => `
+              ${(invoice.lines || []).map(item => `
                 <tr>
-                  <td>${item.name.substring(0, 30)}</td>
+                  <td>${(item.name || item.product_name || '').substring(0, 30)}</td>
                   <td class="text-center">${item.qty}</td>
-                  <td class="text-right">${(item.sellPrice || item.price).toFixed(2)}</td>
-                  <td class="text-right">${(item.qty * (item.sellPrice || item.price)).toFixed(2)}</td>
+                  <td class="text-right">${(item.sell_price || item.price || 0).toFixed(2)}</td>
+                  <td class="text-right">${(item.qty * (item.sell_price || item.price || 0)).toFixed(2)}</td>
                 </tr>
               `).join('')}
             </tbody>
           </table>
           
           <div class="totals">
-            <div class="row"><span>SUB TOTAL :</span><span>${(invoice.subtotal || invoice.payable + (invoice.discount || 0)).toFixed(2)}</span></div>
+            <div class="row"><span>SUB TOTAL :</span><span>${(invoice.subtotal || invoice.payable + (invoice.discount || 0) || 0).toFixed(2)}</span></div>
             ${(invoice.discount || 0) > 0 ? `<div class="row"><span>DISCOUNT :</span><span>${(invoice.discount || 0).toFixed(2)}</span></div>` : ''}
             <div class="total-row"><span>NET TOTAL :</span><span>${(invoice.payable || invoice.total || 0).toFixed(2)}</span></div>
             <div class="row"><span>${invoice.method || 'CASH'} :</span><span>${(invoice.paid || 0).toFixed(2)}</span></div>
@@ -266,118 +458,85 @@ export function SalesInvoicePanel({ user }) {
           <div class="thankyou">Thank you come again..!</div>
           <div class="footer"><div class="system-info">System By: Inshaf<br>0725335460</div></div>
         </div>
-        
-        <div style="text-align: center; margin-top: 20px;" class="no-print">
-          <button onclick="window.print();" style="padding: 10px 20px; margin: 5px; cursor: pointer; font-size: 14px;">🖨️ Print Receipt</button>
-          <button onclick="window.close();" style="padding: 10px 20px; margin: 5px; cursor: pointer; font-size: 14px;">✖️ Close</button>
-        </div>
-        <script>
-          window.onload = function() { setTimeout(function() { window.print(); }, 300); };
-        </script>
       </body>
       </html>
     `;
-
-    printWindow.document.write(receiptHTML);
-    printWindow.document.close();
   };
 
-  const saveInvoice = () => {
-    if (!cart.length) { toast('Add products'); return; }
-    if (!custName.trim()) { toast('Enter customer name'); return; }
+  // ── PRINT FUNCTIONS ──────────────────────────────────────
 
-    const inv = {
-      id: editInvId || nextInv(),
-      date: invDate,
-      customer: custName,
-      mobile,
-      address,
-      lines: cart.map(i => ({ id: i.id, name: i.name, qty: i.qty, sellPrice: i.price, total: i.qty * i.price })),
-      subtotal: sub,
-      discount: +discount,
-      payable,
-      paid: +paid,
-      due,
-      method,
-      reference,
-      remarks,
-      change: change,
-      isCreditSale: due > 0,
-      status: due > 0 ? 'credit' : 'paid'
-    };
+  const printReceipt = (invoice) => {
+    if (!invoice) {
+      toast('No invoice to print.');
+      return;
+    }
 
-    let updSales;
-    if (editInvId) {
-      const old = sales.find(i => i.id === editInvId);
-      if (old) {
-        const upd = products.map(p => { const ol = old.lines.find(l => l.id === p.id); return ol ? { ...p, stock: p.stock + ol.qty, active: true } : p; });
-        const upd2 = upd.map(p => { const nl = cart.find(l => l.id === p.id); return nl ? { ...p, stock: Math.max(0, p.stock - nl.qty), active: p.stock - nl.qty > 0 } : p; });
-        save(SK.PRODUCTS, upd2);
-        setProducts(upd2);
+    try {
+      const receiptHTML = generateReceiptHTML(invoice);
+      
+      const printWindow = window.open('', '_blank', 'width=400,height=600,menubar=no,toolbar=no,location=no,status=no,scrollbars=yes');
+      
+      if (!printWindow) {
+        printReceiptWithIframe(receiptHTML);
+        return;
       }
-      updSales = sales.map(i => i.id === editInvId ? inv : i);
-    } else {
-      const updP = products.map(p => { const l = cart.find(i => i.id === p.id); return l ? { ...p, stock: Math.max(0, p.stock - l.qty), active: p.stock - l.qty > 0 } : p; });
-      save(SK.PRODUCTS, updP);
-      setProducts(updP);
-      updSales = [...sales, inv];
+
+      printWindow.document.write(receiptHTML);
+      printWindow.document.close();
+      printWindow.focus();
+      
+      setTimeout(() => {
+        printWindow.print();
+      }, 500);
+      
+    } catch (error) {
+      console.error('Print error:', error);
+      toast('Error printing. Trying alternative method...');
+      printReceiptWithIframe(generateReceiptHTML(invoice));
     }
+  };
 
-    setSales(updSales);
-    save(SK.SALES, updSales);
+  const printReceiptWithIframe = (htmlContent) => {
+    try {
+      const iframe = document.createElement('iframe');
+      iframe.style.position = 'fixed';
+      iframe.style.right = '0';
+      iframe.style.bottom = '0';
+      iframe.style.width = '0';
+      iframe.style.height = '0';
+      iframe.style.border = 'none';
+      iframe.style.visibility = 'hidden';
+      document.body.appendChild(iframe);
 
-    if (due > 0) {
-      const creditRecord = {
-        id: `CR_${inv.id}`,
-        invoiceId: inv.id,
-        customerId: custName,
-        customerName: custName,
-        mobile,
-        date: invDate,
-        totalAmount: payable,
-        paidAmount: +paid,
-        balance: due,
-        status: 'pending',
-        payments: [{ date: invDate, amount: +paid, method, reference }]
-      };
+      const iframeDoc = iframe.contentWindow.document;
+      iframeDoc.open();
+      iframeDoc.write(htmlContent);
+      iframeDoc.close();
 
-      const existingCredit = credits.find(c => c.invoiceId === inv.id);
-      if (existingCredit) {
-        setCredits(credits.map(c => c.invoiceId === inv.id ? creditRecord : c));
-        save(SK.CREDITS, credits.map(c => c.invoiceId === inv.id ? creditRecord : c));
-      } else {
-        const newCredits = [...credits, creditRecord];
-        setCredits(newCredits);
-        save(SK.CREDITS, newCredits);
-      }
-      toast(`⚠️ Credit sale recorded! Balance due: LKR ${due.toFixed(2)}`);
-    } else if (!editInvId && credits.some(c => c.invoiceId === inv.id)) {
-      const updatedCredits = credits.filter(c => c.invoiceId !== inv.id);
-      setCredits(updatedCredits);
-      save(SK.CREDITS, updatedCredits);
+      setTimeout(() => {
+        try {
+          iframe.contentWindow.print();
+          setTimeout(() => {
+            document.body.removeChild(iframe);
+          }, 3000);
+        } catch (e) {
+          console.error('Iframe print error:', e);
+          document.body.removeChild(iframe);
+          toast('Please try printing from the menu.');
+        }
+      }, 500);
+      
+    } catch (error) {
+      console.error('Iframe print fallback error:', error);
+      toast('Could not print. Please try again.');
     }
-
-    if (custName && !customers.some(c => c.name === custName && c.mobile === mobile)) {
-      const upd = [...customers, { name: custName, mobile, address }];
-      setCustomers(upd);
-      save(SK.CUSTOMERS, upd);
-    }
-
-    setLastSavedInvoice(inv);
-    toast(`✅ Invoice ${inv.id} saved!`);
-
-    if (window.confirm('Invoice saved successfully! Do you want to print the receipt?')) {
-      printReceipt(inv);
-    }
-
-    clearForm();
   };
 
   const printLastInvoice = () => {
     if (lastSavedInvoice) {
       printReceipt(lastSavedInvoice);
-    } else if (sales.length > 0) {
-      const lastInvoice = sales[sales.length - 1];
+    } else if (salesArray.length > 0) {
+      const lastInvoice = salesArray[salesArray.length - 1];
       printReceipt(lastInvoice);
     } else {
       toast('No invoice to print. Please save an invoice first.');
@@ -386,6 +545,178 @@ export function SalesInvoicePanel({ user }) {
 
   const printSelectedInvoice = (invoice) => {
     printReceipt(invoice);
+  };
+
+  // ── SAVE INVOICE ──────────────────────────────────────────
+
+  const saveInvoice = async () => {
+    if (!cart.length) { toast('Add products'); return; }
+    if (!custName.trim()) { toast('Enter customer name'); return; }
+
+    try {
+      let invoiceId = editInvId || generateInvoiceId(salesArray);
+      
+      if (!editInvId && isIdExists(invoiceId, salesArray)) {
+        invoiceId = generateInvoiceId(salesArray);
+        setInvId(invoiceId);
+      }
+
+      const inv = {
+        id: invoiceId,
+        date: invDate,
+        customer: custName,
+        mobile,
+        address,
+        lines: cart.map(i => ({ 
+          product_id: i.id,
+          product_name: i.name,
+          qty: i.qty, 
+          sell_price: i.price,
+          total: i.qty * i.price 
+        })),
+        subtotal: sub,
+        discount: +discount,
+        payable,
+        paid: +paid,
+        due,
+        method,
+        reference,
+        remarks,
+        change: change,
+        isCreditSale: due > 0,
+        status: due > 0 ? 'credit' : 'paid'
+      };
+
+      console.log('💾 Saving invoice:', inv);
+
+      // Update or create invoice
+      let updatedSales;
+      if (editInvId) {
+        // Update existing invoice
+        updatedSales = salesArray.map(s => s.id === editInvId ? inv : s);
+        setSales(updatedSales);
+        
+        if (window.api && window.api.updateSalesInvoice) {
+          await window.api.updateSalesInvoice(editInvId, inv);
+          console.log('✅ Invoice updated in SQLite');
+        } else {
+          await save(SK.SALES, updatedSales);
+        }
+        toast(`✅ Invoice ${inv.id} updated successfully!`);
+      } else {
+        // Create new invoice
+        if (window.api && window.api.createSalesInvoice) {
+          await window.api.createSalesInvoice(inv);
+          console.log('✅ Invoice saved to SQLite');
+          updatedSales = [...salesArray, inv];
+        } else {
+          updatedSales = [...salesArray, inv];
+          setSales(updatedSales);
+          await save(SK.SALES, updatedSales);
+        }
+        toast(`✅ Invoice ${inv.id} saved successfully!`);
+      }
+
+      // Update product stocks
+      const updProducts = productsArray.map(p => { 
+        const l = cart.find(i => i.id === p.id); 
+        return l ? { ...p, stock: Math.max(0, (p.stock || 0) - l.qty), active: (p.stock || 0) - l.qty > 0 } : p; 
+      });
+      setProducts(updProducts);
+      
+      try {
+        if (window.api && window.api.updateProduct) {
+          for (const p of updProducts) {
+            const original = productsArray.find(prod => prod.id === p.id);
+            if (original && p.stock !== original.stock) {
+              await window.api.updateProduct(p.id, p);
+            }
+          }
+        } else {
+          await save(SK.PRODUCTS, updProducts);
+        }
+      } catch (e) {
+        console.warn('Error updating products:', e);
+        await save(SK.PRODUCTS, updProducts);
+      }
+
+      // Handle credit
+      if (due > 0) {
+        const creditRecord = {
+          id: `CR_${inv.id}`,
+          invoiceId: inv.id,
+          customerName: custName,
+          mobile,
+          date: invDate,
+          totalAmount: payable,
+          paidAmount: +paid,
+          balance: due,
+          status: 'pending',
+          payments: [{ date: invDate, amount: +paid, method, reference }]
+        };
+
+        let updatedCredits = creditsArray.filter(c => c.invoiceId !== inv.id);
+        updatedCredits.push(creditRecord);
+        setCredits(updatedCredits);
+        
+        try {
+          if (window.api && window.api.createCredit) {
+            await window.api.createCredit(creditRecord);
+          } else {
+            await save(SK.CREDITS, updatedCredits);
+          }
+        } catch (e) {
+          console.warn('Error saving credit:', e);
+          await save(SK.CREDITS, updatedCredits);
+        }
+        toast(`⚠️ Credit sale recorded! Balance due: LKR ${due.toFixed(2)}`);
+      }
+
+      // Add customer
+      if (custName && !customersArray.some(c => c.name === custName && c.mobile === mobile)) {
+        const newCustomer = { name: custName, mobile, address };
+        const upd = [...customersArray, newCustomer];
+        setCustomers(upd);
+        try {
+          if (window.api && window.api.createCustomer) {
+            await window.api.createCustomer(newCustomer);
+          } else {
+            await save(SK.CUSTOMERS, upd);
+          }
+        } catch (e) {
+          console.warn('Error saving customer:', e);
+          await save(SK.CUSTOMERS, upd);
+        }
+      }
+
+      setLastSavedInvoice(inv);
+
+      if (window.confirm('Invoice saved successfully! Do you want to print the receipt?')) {
+        printReceipt(inv);
+      }
+
+      // Refresh and clear
+      await refreshData();
+      clearForm();
+      
+    } catch (error) {
+      console.error('Error saving invoice:', error);
+      toast('Error saving invoice: ' + error.message);
+    }
+  };
+
+  const refreshData = async () => {
+    try {
+      if (window.api && window.api.getSalesInvoices) {
+        const salesData = await window.api.getSalesInvoices() || [];
+        setSales(salesData);
+        const productsData = await window.api.getProducts() || [];
+        setProducts(productsData);
+        setInvId(generateInvoiceId(salesData));
+      }
+    } catch (e) {
+      console.warn('Error refreshing data:', e);
+    }
   };
 
   const clearForm = () => {
@@ -399,48 +730,54 @@ export function SalesInvoicePanel({ user }) {
     setRemarks('');
     setMethod('Cash');
     setEditInvId(null);
-    setInvId(padId(load(SK.SALES, []), 'INV', 5));
+    setInvId(generateInvoiceId(salesArray));
     setCustomerPendingInvoices([]);
     setShowCreditDetails(false);
+    setCustomerInvoiceHistory([]);
+    setShowCustomerHistory(false);
   };
 
   const loadForEdit = (id) => {
-    const inv = sales.find(i => i.id === id);
-    if (!inv) { toast('Not found'); return; }
-    setEditInvId(inv.id);
-    setInvId(inv.id);
-    setCustName(inv.customer);
-    setMobile(inv.mobile || '');
-    setAddress(inv.address || '');
-    setDiscount(inv.discount);
-    setAmtPaid(inv.paid);
-    setMethod(inv.method || 'Cash');
-    setReference(inv.reference || '');
-    setRemarks(inv.remarks || '');
-    setCart(inv.lines.map(l => ({ id: l.id, name: l.name, qty: l.qty, price: l.sellPrice })));
-    updateCustomerPending(inv.customer);
-    if (inv.due > 0) setShowCreditDetails(true);
-    toast(`✏️ Editing ${inv.id}`);
+    loadInvoiceData(id);
   };
 
   const filteredHistory = () => {
-    let filtered = [...sales].reverse();
+    let filtered = [...salesArray].reverse();
     if (histSearch) {
       filtered = filtered.filter(i =>
-        i.id.toLowerCase().includes(histSearch.toLowerCase()) ||
-        i.customer.toLowerCase().includes(histSearch.toLowerCase()) ||
-        i.lines.some(line => line.name.toLowerCase().includes(histSearch.toLowerCase()))
+        i.id?.toLowerCase().includes(histSearch.toLowerCase()) ||
+        i.customer?.toLowerCase().includes(histSearch.toLowerCase()) ||
+        i.lines?.some(line => line.product_name?.toLowerCase().includes(histSearch.toLowerCase()))
       );
     }
     if (dateFrom) filtered = filtered.filter(i => i.date >= dateFrom);
     if (dateTo) filtered = filtered.filter(i => i.date <= dateTo);
-    if (viewMode === 'credit') filtered = filtered.filter(i => i.due > 0);
-    else if (viewMode === 'paid') filtered = filtered.filter(i => i.due === 0);
+    if (viewMode === 'credit') filtered = filtered.filter(i => (i.due || 0) > 0);
+    else if (viewMode === 'paid') filtered = filtered.filter(i => (i.due || 0) === 0);
     return filtered;
   };
 
+  // ── Loading state ──────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <div>
+        <GlassCard title="💰 Sales Invoice">
+          <div style={{ textAlign: 'center', padding: '40px' }}>
+            <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+            <div>Loading sales data...</div>
+          </div>
+        </GlassCard>
+      </div>
+    );
+  }
+
+  // ── Render ────────────────────────────────────────────────
+
   return (
     <div>
+      <div ref={printContainerRef} style={{ display: 'none' }} />
+
       {/* Credit Alert Banner */}
       {custName && customerPendingInvoices.length > 0 && showCreditDetails && (
         <div style={{
@@ -460,7 +797,7 @@ export function SalesInvoicePanel({ user }) {
             </div>
             <div style={{ textAlign: 'right' }}>
               <div style={{ fontSize: 24, fontWeight: 800, color: '#dc2626' }}>
-                LKR {customerPendingInvoices.reduce((sum, inv) => sum + inv.due, 0).toFixed(2)}
+                LKR {customerPendingInvoices.reduce((sum, inv) => sum + (inv.due || 0), 0).toFixed(2)}
               </div>
               <div style={{ fontSize: 12, color: '#78350f' }}>Total Due from {customerPendingInvoices.length} invoice(s)</div>
             </div>
@@ -486,14 +823,14 @@ export function SalesInvoicePanel({ user }) {
                     <tr key={inv.id} style={{ borderBottom: '1px solid #fde68a', fontSize: 13 }}>
                       <td style={{ padding: '8px', fontWeight: 600 }}>{inv.id}</td>
                       <td style={{ padding: '8px' }}>{inv.date}</td>
-                      <td style={{ padding: '8px', textAlign: 'right' }}>LKR {inv.payable.toFixed(2)}</td>
-                      <td style={{ padding: '8px', textAlign: 'right' }}>LKR {inv.paid.toFixed(2)}</td>
-                      <td style={{ padding: '8px', textAlign: 'right', color: '#dc2626', fontWeight: 700 }}>LKR {inv.due.toFixed(2)}</td>
+                      <td style={{ padding: '8px', textAlign: 'right' }}>LKR {(inv.payable || 0).toFixed(2)}</td>
+                      <td style={{ padding: '8px', textAlign: 'right' }}>LKR {(inv.paid || 0).toFixed(2)}</td>
+                      <td style={{ padding: '8px', textAlign: 'right', color: '#dc2626', fontWeight: 700 }}>LKR {(inv.due || 0).toFixed(2)}</td>
                       <td style={{ padding: '8px', textAlign: 'center' }}>
                         <button
                           style={{ background: '#f59e0b', color: '#fff', border: 'none', padding: '4px 12px', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}
                           onClick={() => {
-                            const creditRecord = credits.find(c => c.invoiceId === inv.id);
+                            const creditRecord = creditsArray.find(c => c.invoiceId === inv.id);
                             if (creditRecord) openPaymentModal(creditRecord);
                           }}
                         >💰 Record Payment</button>
@@ -504,7 +841,7 @@ export function SalesInvoicePanel({ user }) {
                 <tfoot>
                   <tr style={{ background: '#fef3c7', fontWeight: 700 }}>
                     <td colSpan="4" style={{ padding: '10px 8px', textAlign: 'right' }}>Total Due:</td>
-                    <td style={{ padding: '10px 8px', textAlign: 'right', color: '#dc2626', fontSize: 16 }}>LKR {customerPendingInvoices.reduce((sum, inv) => sum + inv.due, 0).toFixed(2)}</td>
+                    <td style={{ padding: '10px 8px', textAlign: 'right', color: '#dc2626', fontSize: 16 }}>LKR {customerPendingInvoices.reduce((sum, inv) => sum + (inv.due || 0), 0).toFixed(2)}</td>
                     <td style={{ padding: '10px 8px' }}></td>
                   </tr>
                 </tfoot>
@@ -514,19 +851,137 @@ export function SalesInvoicePanel({ user }) {
         </div>
       )}
 
+      {/* Customer History Modal */}
+      {showCustomerHistory && customerInvoiceHistory.length > 0 && (
+        <div style={{
+          background: 'linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)',
+          borderLeft: '6px solid #3b82f6',
+          borderRadius: 12,
+          marginBottom: 20,
+          boxShadow: '0 4px 12px rgba(59, 130, 246, 0.2)',
+        }}>
+          <div style={{ padding: '16px 20px', borderBottom: '1px solid #bfdbfe', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 28 }}>📋</span>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 18, color: '#1e40af' }}>Customer History</div>
+                <div style={{ color: '#1e3a8a', fontSize: 13, marginTop: 4 }}>
+                  {custName} - {customerInvoiceHistory.length} invoice(s) found
+                </div>
+              </div>
+            </div>
+            <button onClick={() => setShowCustomerHistory(false)} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#1e40af' }}>✕</button>
+          </div>
+
+          <div style={{ padding: '16px 20px', maxHeight: 250, overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#bfdbfe', fontSize: 12 }}>
+                  <th style={{ padding: '8px', textAlign: 'left' }}>Invoice</th>
+                  <th style={{ padding: '8px', textAlign: 'left' }}>Date</th>
+                  <th style={{ padding: '8px', textAlign: 'right' }}>Total</th>
+                  <th style={{ padding: '8px', textAlign: 'right' }}>Paid</th>
+                  <th style={{ padding: '8px', textAlign: 'right' }}>Due</th>
+                  <th style={{ padding: '8px', textAlign: 'center' }}>Status</th>
+                  <th style={{ padding: '8px', textAlign: 'center' }}>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {customerInvoiceHistory.map(inv => (
+                  <tr key={inv.id} style={{ borderBottom: '1px solid #bfdbfe', fontSize: 13 }}>
+                    <td style={{ padding: '8px', fontWeight: 600 }}>{inv.id}</td>
+                    <td style={{ padding: '8px' }}>{inv.date}</td>
+                    <td style={{ padding: '8px', textAlign: 'right' }}>LKR {(inv.payable || 0).toFixed(2)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right' }}>LKR {(inv.paid || 0).toFixed(2)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', color: (inv.due || 0) > 0 ? '#dc2626' : '#15803d', fontWeight: 700 }}>
+                      LKR {(inv.due || 0).toFixed(2)}
+                    </td>
+                    <td style={{ padding: '8px', textAlign: 'center' }}>
+                      <span style={{
+                        background: (inv.due || 0) > 0 ? '#fef3c7' : '#d1fae5',
+                        padding: '2px 10px',
+                        borderRadius: 12,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: (inv.due || 0) > 0 ? '#92400e' : '#065f46'
+                      }}>
+                        {(inv.due || 0) > 0 ? '⚠️ Credit' : '✅ Paid'}
+                      </span>
+                    </td>
+                    <td style={{ padding: '8px', textAlign: 'center' }}>
+                      <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+                        <button
+                          style={{ background: '#3b82f6', color: '#fff', border: 'none', padding: '2px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                          onClick={() => loadInvoiceData(inv.id)}
+                        >
+                          ✏️
+                        </button>
+                        <button
+                          style={{ background: '#0ea5e9', color: '#fff', border: 'none', padding: '2px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                          onClick={() => printSelectedInvoice(inv)}
+                        >
+                          🖨️
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: '#dbeafe', fontWeight: 700 }}>
+                  <td colSpan="2" style={{ padding: '10px 8px' }}>Summary</td>
+                  <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                    LKR {customerInvoiceHistory.reduce((sum, inv) => sum + (inv.payable || 0), 0).toFixed(2)}
+                  </td>
+                  <td style={{ padding: '10px 8px', textAlign: 'right' }}>
+                    LKR {customerInvoiceHistory.reduce((sum, inv) => sum + (inv.paid || 0), 0).toFixed(2)}
+                  </td>
+                  <td style={{ padding: '10px 8px', textAlign: 'right', color: '#dc2626' }}>
+                    LKR {customerInvoiceHistory.reduce((sum, inv) => sum + (inv.due || 0), 0).toFixed(2)}
+                  </td>
+                  <td colSpan="2" style={{ padding: '10px 8px' }}></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Main Invoice Form */}
       <div style={{ background: 'linear-gradient(135deg,#0f172a,#2563eb)', color: '#fff', borderRadius: '24px 24px 0 0', padding: '16px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div><div style={{ fontSize: 20, fontWeight: 800 }}>Metro Phone Shop POS</div><div style={{ fontSize: 13, opacity: 0.8 }}>Smart Billing with Credit Tracking</div></div>
-        {editInvId && <span style={{ background: '#f59e0b', padding: '4px 14px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>✏️ EDIT MODE</span>}
+        {editInvId && <span style={{ background: '#f59e0b', padding: '4px 14px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>✏️ EDIT MODE: {editInvId}</span>}
       </div>
 
       <div style={{ background: 'rgba(255,255,255,0.8)', backdropFilter: 'blur(12px)', borderRadius: '0 0 24px 24px', border: '1px solid rgba(255,255,255,0.3)', marginBottom: 24, boxShadow: '0 8px 32px rgba(0,0,0,0.08)' }}>
         <div style={styles.grid2}>
           <div style={{ padding: 24 }}>
             <FormGrid cols={2}>
-              <Field label="Invoice ID"><input style={styles.input} readOnly value={invId} /></Field>
+              <Field label="Invoice ID">
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input style={{ ...styles.input, flex: 1 }} readOnly value={invId} />
+                  {!editInvId && (
+                    <button 
+                      style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '4px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}
+                      onClick={loadInvoiceByNumber}
+                    >
+                      📂 Load
+                    </button>
+                  )}
+                </div>
+              </Field>
               <Field label="Invoice Date"><input type="date" style={styles.input} value={invDate} onChange={e => setInvDate(e.target.value)} /></Field>
               <Field label="Customer Name *" style={{ position: 'relative' }}>
-                <input style={styles.input} value={custName} onChange={e => filterCustSugg(e.target.value)} placeholder="Type or select..." />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input style={{ ...styles.input, flex: 1 }} value={custName} onChange={e => filterCustSugg(e.target.value)} placeholder="Type or select..." />
+                  <button 
+                    style={{ background: '#8b5cf6', color: 'white', border: 'none', padding: '4px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}
+                    onClick={() => loadCustomerHistory(custName)}
+                    disabled={!custName.trim()}
+                  >
+                    📋 History
+                  </button>
+                </div>
                 {custSugg.length > 0 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'white', border: '1px solid #e2e8f0', borderRadius: 12, maxHeight: 200, overflowY: 'auto', zIndex: 10 }}>
                     {custSugg.map((c, i) => {
@@ -563,7 +1018,7 @@ export function SalesInvoicePanel({ user }) {
                         <td style={styles.td}>{item.name}</td>
                         <td style={styles.td}><input style={{ ...styles.input, width: 70 }} type="number" value={item.qty} min={1} onChange={e => setCart(prev => prev.map((x, j) => j === i ? { ...x, qty: Math.max(1, +e.target.value) } : x))} /></td>
                         <td style={styles.td}><input style={{ ...styles.input, width: 90 }} type="number" value={item.price} onChange={e => setCart(prev => prev.map((x, j) => j === i ? { ...x, price: +e.target.value } : x))} /></td>
-                        <td style={styles.td}>LKR {(item.qty * item.price).toFixed(2)}</td>
+                        <td style={styles.td}>LKR {((item.qty || 0) * (item.price || 0)).toFixed(2)}</td>
                         <td style={styles.td}><button style={styles.btnDanger} onClick={() => setCart(prev => prev.filter((_, j) => j !== i))}>✕</button></td>
                       </tr>
                     ))
@@ -634,16 +1089,16 @@ export function SalesInvoicePanel({ user }) {
         </div>
 
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', padding: 16, background: 'rgba(241,245,249,0.6)', borderTop: '1px solid rgba(226,232,240,0.8)', flexWrap: 'wrap', borderRadius: '0 0 24px 24px' }}>
-          <button style={{ ...styles.btnPrimary, background: '#10b981' }} onClick={saveInvoice}>💾 SAVE INVOICE</button>
+          <button style={{ ...styles.btnPrimary, background: '#10b981' }} onClick={saveInvoice}>
+            {editInvId ? '💾 UPDATE INVOICE' : '💾 SAVE INVOICE'}
+          </button>
           <button style={{ ...styles.btnPrimary, background: '#0ea5e9' }} onClick={printLastInvoice}>🖨️ PRINT RECEIPT</button>
           <button style={{ ...styles.btnPrimary, background: '#475569' }} onClick={clearForm}>🗑️ CLEAR FORM</button>
-          <button style={{ ...styles.btnPrimary, background: '#8b5cf6' }} onClick={() => { 
-            const id = prompt('Enter Invoice ID to edit:'); 
-            if (id) loadForEdit(id.toUpperCase()); 
-          }}>✏️ EDIT EXISTING</button>
+          <button style={{ ...styles.btnPrimary, background: '#8b5cf6' }} onClick={loadInvoiceByNumber}>📂 LOAD INVOICE</button>
         </div>
       </div>
 
+      {/* Sales History */}
       <GlassCard title="📜 Sales & Credit History">
         <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
           <input style={{ ...styles.input, flex: 2 }} placeholder="Search by Invoice ID, Customer Name, or Product Name..." value={histSearch} onChange={e => setHistSearch(e.target.value)} />
@@ -659,27 +1114,36 @@ export function SalesInvoicePanel({ user }) {
 
         <div style={{ maxHeight: 400, overflowY: 'auto' }}>
           {filteredHistory().map(inv => (
-            <div key={inv.id} style={{ ...styles.histItem, cursor: 'pointer', borderLeft: inv.due > 0 ? '4px solid #f59e0b' : '4px solid #10b981', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div key={inv.id} style={{ ...styles.histItem, cursor: 'pointer', borderLeft: (inv.due || 0) > 0 ? '4px solid #f59e0b' : '4px solid #10b981', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <div style={{ flex: 1 }} onClick={() => setSelectedInvoice(inv)}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div><strong>{inv.id}</strong> | {inv.date} | 👤 {inv.customer}</div>
-                  <div style={{ fontSize: 12, fontWeight: 600, background: inv.due > 0 ? '#fef3c7' : '#d1fae5', padding: '4px 10px', borderRadius: 20 }}>
-                    {inv.due > 0 ? `💳 Due: LKR ${inv.due.toFixed(2)}` : '✅ Paid'}
+                  <div style={{ fontSize: 12, fontWeight: 600, background: (inv.due || 0) > 0 ? '#fef3c7' : '#d1fae5', padding: '4px 10px', borderRadius: 20 }}>
+                    {(inv.due || 0) > 0 ? `💳 Due: LKR ${(inv.due || 0).toFixed(2)}` : '✅ Paid'}
                   </div>
                 </div>
-                <div style={{ fontSize: 13, marginTop: 6 }}>LKR {(inv.payable || 0).toFixed(2)} | {inv.method} | {inv.lines.reduce((a, b) => a + b.qty, 0)} items</div>
+                <div style={{ fontSize: 13, marginTop: 6 }}>LKR {(inv.payable || 0).toFixed(2)} | {inv.method} | {inv.lines?.reduce((a, b) => a + b.qty, 0) || 0} items</div>
               </div>
-              <button
-                style={{ background: '#0ea5e9', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12, marginLeft: 10 }}
-                onClick={(e) => { e.stopPropagation(); printSelectedInvoice(inv); }}
-              >
-                🖨️ Print
-              </button>
+              <div style={{ display: 'flex', gap: 6, marginLeft: 10 }}>
+                <button
+                  style={{ background: '#3b82f6', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}
+                  onClick={(e) => { e.stopPropagation(); loadInvoiceData(inv.id); }}
+                >
+                  ✏️ Edit
+                </button>
+                <button
+                  style={{ background: '#0ea5e9', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}
+                  onClick={(e) => { e.stopPropagation(); printSelectedInvoice(inv); }}
+                >
+                  🖨️ Print
+                </button>
+              </div>
             </div>
           ))}
         </div>
       </GlassCard>
 
+      {/* Invoice Details Modal */}
       {selectedInvoice && (
         <Modal title={`Invoice Details: ${selectedInvoice.id}`} onClose={() => setSelectedInvoice(null)}>
           <div style={{ maxHeight: '70vh', overflowY: 'auto', minWidth: 520 }}>
@@ -688,19 +1152,19 @@ export function SalesInvoicePanel({ user }) {
               <div><strong>Date</strong><div>{selectedInvoice.date}</div></div>
               <div><strong>Mobile</strong><div>{selectedInvoice.mobile || '-'}</div></div>
               <div><strong>Method</strong><div>{selectedInvoice.method}</div></div>
-              <div><strong>Status</strong><div style={{ color: selectedInvoice.due > 0 ? '#f59e0b' : '#10b981', fontWeight: 600 }}>{selectedInvoice.due > 0 ? `Credit - Due: LKR ${selectedInvoice.due.toFixed(2)}` : 'Fully Paid'}</div></div>
+              <div><strong>Status</strong><div style={{ color: (selectedInvoice.due || 0) > 0 ? '#f59e0b' : '#10b981', fontWeight: 600 }}>{(selectedInvoice.due || 0) > 0 ? `Credit - Due: LKR ${(selectedInvoice.due || 0).toFixed(2)}` : 'Fully Paid'}</div></div>
             </div>
 
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead><tr><th style={styles.th}>Product</th><th style={styles.th}>Qty</th><th style={styles.th}>Price</th><th style={styles.th}>Total</th></tr></thead>
                 <tbody>
-                  {selectedInvoice.lines.map((line, i) => (
+                  {selectedInvoice.lines?.map((line, i) => (
                     <tr key={i}>
-                      <td style={styles.td}>{line.name}</td>
+                      <td style={styles.td}>{line.product_name}</td>
                       <td style={styles.td}>{line.qty}</td>
-                      <td style={styles.td}>LKR {line.sellPrice.toFixed(2)}</td>
-                      <td style={styles.td}>LKR {(line.qty * line.sellPrice).toFixed(2)}</td>
+                      <td style={styles.td}>LKR {(line.sell_price || 0).toFixed(2)}</td>
+                      <td style={styles.td}>LKR {(line.qty * (line.sell_price || 0)).toFixed(2)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -718,16 +1182,16 @@ export function SalesInvoicePanel({ user }) {
             </div>
             {selectedInvoice.remarks && <div style={{ marginTop: 16 }}><strong>Remarks</strong><div>{selectedInvoice.remarks}</div></div>}
 
-            {selectedInvoice.due > 0 && (
+            {(selectedInvoice.due || 0) > 0 && (
               <div style={{ marginTop: 16, padding: 12, background: '#fef3c7', borderRadius: 8 }}>
                 <strong>💰 Credit Payment History</strong>
-                {credits.find(c => c.invoiceId === selectedInvoice.id)?.payments.map((payment, idx) => (
+                {creditsArray.find(c => c.invoiceId === selectedInvoice.id)?.payments?.map((payment, idx) => (
                   <div key={idx} style={{ fontSize: 12, marginTop: 6 }}>📅 {payment.date} | LKR {payment.amount.toFixed(2)} | {payment.method} {payment.reference && `| Ref: ${payment.reference}`}</div>
                 ))}
                 <button
                   style={{ marginTop: 12, background: '#f59e0b', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, cursor: 'pointer' }}
                   onClick={() => {
-                    const creditRecord = credits.find(c => c.invoiceId === selectedInvoice.id);
+                    const creditRecord = creditsArray.find(c => c.invoiceId === selectedInvoice.id);
                     if (creditRecord) openPaymentModal(creditRecord);
                   }}
                 >
@@ -737,6 +1201,9 @@ export function SalesInvoicePanel({ user }) {
             )}
 
             <div style={{ marginTop: 20, display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+              <button style={{ ...styles.btnPrimary, background: '#3b82f6' }} onClick={() => loadInvoiceData(selectedInvoice.id)}>
+                ✏️ Edit Invoice
+              </button>
               <button style={{ ...styles.btnPrimary, background: '#0ea5e9' }} onClick={() => printSelectedInvoice(selectedInvoice)}>
                 🖨️ Print Receipt
               </button>
@@ -752,7 +1219,7 @@ export function SalesInvoicePanel({ user }) {
             <div style={{ marginBottom: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div><strong>Customer:</strong> {selectedCredit.customerName}</div>
               <div><strong>Invoice:</strong> {selectedCredit.invoiceId}</div>
-              <div><strong>Total Due:</strong> LKR {selectedCredit.balance.toFixed(2)}</div>
+              <div><strong>Total Due:</strong> LKR {(selectedCredit.balance || 0).toFixed(2)}</div>
               <div><strong>Date:</strong> {selectedCredit.date}</div>
             </div>
             
@@ -763,10 +1230,10 @@ export function SalesInvoicePanel({ user }) {
                   style={styles.input} 
                   value={paymentAmount}
                   min={0.01}
-                  max={selectedCredit.balance}
+                  max={selectedCredit.balance || 0}
                   step={0.01}
                   onChange={e => setPaymentAmount(e.target.value)} 
-                  placeholder={`Max: ${selectedCredit.balance.toFixed(2)}`}
+                  placeholder={`Max: ${(selectedCredit.balance || 0).toFixed(2)}`}
                 />
               </Field>
               <Field label="Payment Method">
@@ -788,7 +1255,7 @@ export function SalesInvoicePanel({ user }) {
             </FormGrid>
             
             <div style={{ marginTop: 12, padding: 12, background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0' }}>
-              <div><strong>Remaining Balance After Payment:</strong> LKR {(selectedCredit.balance - (parseFloat(paymentAmount) || 0)).toFixed(2)}</div>
+              <div><strong>Remaining Balance After Payment:</strong> LKR {((selectedCredit.balance || 0) - (parseFloat(paymentAmount) || 0)).toFixed(2)}</div>
             </div>
             
             <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>

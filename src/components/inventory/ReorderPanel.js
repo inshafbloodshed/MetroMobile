@@ -1,47 +1,113 @@
-import React, { useState } from 'react';
-import { load, save, toast } from '../../utils/storage';
-import { SK } from '../../utils/constants';
+// src/components/inventory/ReorderPanel.js
+import React, { useState, useEffect } from 'react';
+import { load, save, toast, SK } from '../../utils/storage';
 import { styles } from '../../utils/styles';
 import { GlassCard } from '../common/GlassCard';
 
 export function ReorderPanel() {
-  const [products, setProducts] = useState(() => load(SK.PRODUCTS, []));
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [restockId, setRestockId] = useState(null);
   const [restockQty, setRestockQty] = useState(10);
 
+  // ── Load data on component mount ──────────────────────────
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        setLoading(true);
+        const productsData = await load(SK.PRODUCTS, []);
+        setProducts(productsData || []);
+      } catch (error) {
+        console.error('Error loading products:', error);
+        toast('Error loading products');
+        setProducts([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadData();
+  }, []);
+
+  // ── Derived values ──────────────────────────────────────
+
+  // Ensure products is an array
+  const productsArray = Array.isArray(products) ? products : [];
+
   // Show products that are out of stock OR below reorder level
-  const reorderProds = products.filter(p => 
-    p.stock <= (p.reorderLevel || 5) && 
-    p.name?.toLowerCase().includes(search.toLowerCase())
-  );
+  const reorderProds = productsArray.filter(p => {
+    const stock = p.stock || 0;
+    const reorderLevel = p.reorderLevel || 5;
+    return stock <= reorderLevel && 
+           p.name?.toLowerCase().includes(search.toLowerCase());
+  });
 
   // Sort by stock level (lowest first)
-  const sortedReorderProds = [...reorderProds].sort((a, b) => a.stock - b.stock);
+  const sortedReorderProds = [...reorderProds].sort((a, b) => (a.stock || 0) - (b.stock || 0));
 
-  const doRestock = (productId, qty) => {
-    const product = products.find(p => p.id === productId);
-    if (!product) return;
-    
-    const upd = products.map(p => 
-      p.id === productId 
-        ? { ...p, stock: qty, active: true } 
-        : p
-    );
-    save(SK.PRODUCTS, upd); 
-    setProducts(upd);
-    toast(`✅ ${product.name} restocked to ${qty} units`);
-    setRestockId(null);
+  // ── Handlers ──────────────────────────────────────────────
+
+  const doRestock = async (productId, qty) => {
+    try {
+      const product = productsArray.find(p => p.id === productId);
+      if (!product) {
+        toast('Product not found');
+        return;
+      }
+      
+      const updatedProduct = { 
+        ...product, 
+        stock: qty, 
+        active: 1 
+      };
+      
+      // Update via API
+      await window.api.updateProduct(productId, updatedProduct);
+      
+      // Update local state
+      const upd = productsArray.map(p => 
+        p.id === productId 
+          ? { ...p, stock: qty, active: true } 
+          : p
+      );
+      setProducts(upd);
+      toast(`✅ ${product.name} restocked to ${qty} units`);
+      setRestockId(null);
+    } catch (error) {
+      console.error('Error restocking:', error);
+      toast('Error restocking product');
+    }
   };
 
   // Auto-restock to reorder level
-  const autoRestockToLevel = (productId) => {
-    const product = products.find(p => p.id === productId);
-    if (!product) return;
-    
-    const reorderQty = product.reorderLevel || 5;
-    doRestock(productId, reorderQty);
+  const autoRestockToLevel = async (productId) => {
+    try {
+      const product = productsArray.find(p => p.id === productId);
+      if (!product) return;
+      
+      const reorderQty = product.reorderLevel || 5;
+      await doRestock(productId, reorderQty);
+    } catch (error) {
+      console.error('Error auto-restocking:', error);
+      toast('Error auto-restocking product');
+    }
   };
+
+  // ── Loading state ──────────────────────────────────────────
+
+  if (loading) {
+    return (
+      <GlassCard title="⚠️ Products Need Reorder" badge="Loading...">
+        <div style={{ textAlign: 'center', padding: '40px' }}>
+          <div style={{ fontSize: '24px', marginBottom: '12px' }}>⏳</div>
+          <div>Loading products...</div>
+        </div>
+      </GlassCard>
+    );
+  }
+
+  // ── Render ────────────────────────────────────────────────
 
   return (
     <GlassCard title="⚠️ Products Need Reorder" badge={`${reorderProds.length} items`}>
@@ -59,8 +125,8 @@ export function ReorderPanel() {
           fontSize: 12, 
           color: '#64748b' 
         }}>
-          <span>🟥 Out of Stock: {reorderProds.filter(p => p.stock <= 0).length}</span>
-          <span>🟨 Low Stock: {reorderProds.filter(p => p.stock > 0 && p.stock <= (p.reorderLevel || 5)).length}</span>
+          <span>🟥 Out of Stock: {reorderProds.filter(p => (p.stock || 0) <= 0).length}</span>
+          <span>🟨 Low Stock: {reorderProds.filter(p => (p.stock || 0) > 0 && (p.stock || 0) <= (p.reorderLevel || 5)).length}</span>
         </div>
       </div>
       
@@ -84,8 +150,10 @@ export function ReorderPanel() {
               </tr>
             )}
             {sortedReorderProds.map(p => {
-              const isOutOfStock = p.stock <= 0;
-              const isLowStock = p.stock > 0 && p.stock <= (p.reorderLevel || 5);
+              const stock = p.stock || 0;
+              const reorderLevel = p.reorderLevel || 5;
+              const isOutOfStock = stock <= 0;
+              const isLowStock = stock > 0 && stock <= reorderLevel;
               const isRestocking = restockId === p.id;
               
               return (
@@ -107,12 +175,12 @@ export function ReorderPanel() {
                       fontSize: 13,
                       fontWeight: 700
                     }}>
-                      {p.stock}
+                      {stock}
                     </span>
                     {isOutOfStock && <span style={{ marginLeft: 6, color: '#dc2626' }}>🔴</span>}
                     {isLowStock && !isOutOfStock && <span style={{ marginLeft: 6, color: '#d97706' }}>⚠️</span>}
                   </td>
-                  <td style={styles.td}>{p.reorderLevel || 5}</td>
+                  <td style={styles.td}>{reorderLevel}</td>
                   <td style={styles.td}>LKR {p.cost}</td>
                   <td style={styles.td}>LKR {p.sell}</td>
                   <td style={styles.td}>
@@ -164,7 +232,7 @@ export function ReorderPanel() {
                             color: '#10b981'
                           }} 
                           onClick={() => autoRestockToLevel(p.id)}
-                          title={`Restock to reorder level (${p.reorderLevel || 5})`}
+                          title={`Restock to reorder level (${reorderLevel})`}
                         >
                           ⚡ Auto
                         </button>

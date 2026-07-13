@@ -1,15 +1,18 @@
+// src/components/inventory/BarcodePrintModal.js
 import React from 'react';
 import { Modal } from '../common/Modal';
 import { styles } from '../../utils/styles';
 import { BarcodeLabel } from '../common/BarcodeComponents';
 import { barcodeSVGString } from '../../utils/barcode';
 import { encryptCost } from '../../utils/encryption';
+import { toast } from '../../utils/storage';
 
-export function printBarcodesForPrinterx(lines, grnId) {
+// Generate print HTML
+const generatePrintHTML = (lines, grnId) => {
   const labelHTMLBlocks = [];
 
   lines.forEach(line => {
-    const encCost = line.encryptedCost || encryptCost(line.costPrice);
+    const encCost = line.encryptedCost || encryptCost(line.costPrice || 0);
     const qty = line.qty || 1;
 
     const singleLabel = `
@@ -29,7 +32,7 @@ export function printBarcodesForPrinterx(lines, grnId) {
     }
   });
 
-  const printHTML = `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8"/>
@@ -133,24 +136,74 @@ export function printBarcodesForPrinterx(lines, grnId) {
   ${labelHTMLBlocks.join('\n')}
   <script>
     window.onload = function() {
-      setTimeout(function() { window.print(); }, 350);
+      setTimeout(function() { 
+        window.print(); 
+      }, 500);
     };
   <\/script>
 </body>
 </html>`;
+};
 
-  const w = window.open('', '_blank', 'width=700,height=500');
-  if (!w) {
-    alert('Pop-up blocked! Please allow pop-ups for this page and try again.');
+// ✅ ELECTRON PRINT FUNCTION
+export function printBarcodesForPrinterx(lines, grnId) {
+  if (!lines || lines.length === 0) {
+    toast('No barcodes to print');
     return;
   }
-  w.document.open();
-  w.document.write(printHTML);
-  w.document.close();
+
+  const printHTML = generatePrintHTML(lines, grnId);
+
+  try {
+    // ✅ Check if we're in Electron
+    if (window.api && window.api.printHtml) {
+      // Use Electron's print API
+      window.api.printHtml(printHTML, 'barcode');
+      return;
+    }
+
+    // ✅ Fallback: Create a new window for printing (browser fallback)
+    const printWindow = window.open('', '_blank', 'width=700,height=500');
+    
+    if (!printWindow) {
+      // If popup is blocked, download the HTML
+      const blob = new Blob([printHTML], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `barcodes_${grnId}.html`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast('📄 Barcode HTML downloaded. Open it to print.');
+      return;
+    }
+
+    printWindow.document.open();
+    printWindow.document.write(printHTML);
+    printWindow.document.close();
+    
+  } catch (error) {
+    console.error('Print error:', error);
+    toast('Error printing. Please try again.');
+  }
 }
 
 export function BarcodePrintModal({ lines, grnId, onClose }) {
-  const totalLabels = lines.reduce((s, l) => s + (l.qty || 1), 0);
+  const totalLabels = lines ? lines.reduce((s, l) => s + (l.qty || 1), 0) : 0;
+
+  if (!lines || lines.length === 0) {
+    return (
+      <Modal title="🏷️ No Barcodes" onClose={onClose}>
+        <div style={{ padding: 20, textAlign: 'center' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>📭</div>
+          <div>No barcodes to print</div>
+          <button style={styles.btnPrimary} onClick={onClose}>Close</button>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal title={`🏷️ Barcodes — ${grnId}`} onClose={onClose}>
@@ -190,7 +243,7 @@ export function BarcodePrintModal({ lines, grnId, onClose }) {
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 10, fontWeight: 700, border: '2px solid #fff',
                 }}>
-                  {l.qty}
+                  {l.qty || 1}
                 </div>
               </div>
             ))}

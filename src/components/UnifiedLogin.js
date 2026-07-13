@@ -1,78 +1,169 @@
 // UnifiedLogin.js
 import React, { useState } from 'react';
 import './UnifiedLogin.css';
-import { load } from '../utils/storage';
+import { load, toast } from '../utils/storage';
 import { SK } from '../utils/constants';
 
 export default function UnifiedLogin({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [role, setRole] = useState('worker'); // 'worker' or 'admin'
+  const [role, setRole] = useState('worker');
+  const [loading, setLoading] = useState(false);
 
-  // Special admin credentials
-  const ADMIN_CREDENTIALS = {
-    'Metroadd': 'Metro123'
-  };
-
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
 
-    // Check Admin Login
-    if (role === 'admin') {
-      // Check special admin first
-      if (ADMIN_CREDENTIALS[username] && ADMIN_CREDENTIALS[username] === password) {
+    try {
+      // ✅ Check for admin/admin123 (special admin with 40% markup)
+      if (username === 'admin' && password === 'admin123') {
         const user = {
-          username: username,
+          username: 'admin',
           role: 'admin',
           isSpecialAdmin: true,
-          displayName: 'Metro Admin'
+          isDiscountAdmin: true, // Flag for 40% discount
+          displayName: 'Admin',
+          name: 'Admin',
+          permissions: {
+            salesInvoice: true,
+            salesReturn: true,
+            productCatalog: true,
+            repairBilling: true,
+            viewCostPrice: true
+          }
         };
         onLogin(user, 'admin');
+        setLoading(false);
         return;
       }
 
-      // Check regular admins from storage
-      const workers = load(SK.WORKERS, []).filter(w => w.role === 'admin' && w.active !== false);
-      const admin = workers.find(w => w.username === username && w.password === password);
-      
-      if (admin) {
+      // ✅ Check for Metroadd/Metro123 (main admin)
+      if (username === 'Metroadd' && password === 'Metro123') {
         const user = {
-          username: admin.username,
+          username: 'Metroadd',
           role: 'admin',
-          isSpecialAdmin: false,
-          displayName: admin.name || admin.username,
-          ...admin
+          isSpecialAdmin: true,
+          isDiscountAdmin: false,
+          displayName: 'Metro Admin',
+          name: 'Metro Admin',
+          permissions: {
+            salesInvoice: true,
+            salesReturn: true,
+            productCatalog: true,
+            repairBilling: true,
+            viewCostPrice: true
+          }
         };
         onLogin(user, 'admin');
+        setLoading(false);
         return;
       }
-      
-      setError('Invalid admin username or password');
-      return;
-    }
 
-    // Check Worker Login
-    if (role === 'worker') {
-      const workers = load(SK.WORKERS, []).filter(worker => worker.active !== false);
-      const worker = workers.find(
-        (entry) => entry.username === username && entry.password === password
-      );
-
-      if (worker) {
-        onLogin(
-          {
-            username: worker.username,
-            role: 'worker',
-            displayName: worker.name || worker.username,
-            ...worker,
-          },
-          'worker'
-        );
-      } else {
-        setError('Invalid worker username or password');
+      // ✅ Also allow Metroadd as worker login
+      if (username === 'Metroadd' && password === 'Metro123' && role === 'worker') {
+        const user = {
+          username: 'Metroadd',
+          role: 'worker',
+          isSpecialAdmin: false,
+          isDiscountAdmin: false,
+          displayName: 'Metro Admin',
+          name: 'Metro Admin',
+          permissions: {
+            salesInvoice: true,
+            salesReturn: true,
+            productCatalog: true,
+            repairBilling: true,
+            viewCostPrice: true
+          }
+        };
+        onLogin(user, 'worker');
+        setLoading(false);
+        return;
       }
+
+      // Check Admin Login from stored workers
+      if (role === 'admin') {
+        let workersData = [];
+        try {
+          const localWorkers = localStorage.getItem('workers');
+          if (localWorkers) {
+            workersData = JSON.parse(localWorkers);
+          } else {
+            workersData = await load(SK.WORKERS, []);
+          }
+        } catch (e) {
+          console.warn('Could not load workers from storage:', e);
+          workersData = [];
+        }
+
+        const workers = Array.isArray(workersData) ? workersData : [];
+        const adminWorkers = workers.filter(w => w.role === 'admin' && w.active !== false);
+        const admin = adminWorkers.find(w => w.username === username && w.password === password);
+        
+        if (admin) {
+          const user = {
+            username: admin.username,
+            role: 'admin',
+            isSpecialAdmin: false,
+            isDiscountAdmin: false,
+            displayName: admin.name || admin.username,
+            ...admin
+          };
+          onLogin(user, 'admin');
+          setLoading(false);
+          return;
+        }
+        
+        setError('Invalid admin username or password');
+        setLoading(false);
+        return;
+      }
+
+      // Check Worker Login
+      if (role === 'worker') {
+        let workersData = [];
+        try {
+          const localWorkers = localStorage.getItem('workers');
+          if (localWorkers) {
+            workersData = JSON.parse(localWorkers);
+          } else {
+            workersData = await load(SK.WORKERS, []);
+          }
+        } catch (e) {
+          console.warn('Could not load workers from storage:', e);
+          workersData = [];
+        }
+
+        const workers = Array.isArray(workersData) ? workersData : [];
+        const activeWorkers = workers.filter(worker => worker.active !== false);
+        const worker = activeWorkers.find(
+          (entry) => entry.username === username && entry.password === password
+        );
+
+        if (worker) {
+          onLogin(
+            {
+              username: worker.username,
+              role: 'worker',
+              isDiscountAdmin: false,
+              displayName: worker.name || worker.username,
+              ...worker,
+            },
+            'worker'
+          );
+          setLoading(false);
+          return;
+        } else {
+          setError('Invalid worker username or password');
+        }
+      }
+    } catch (error) {
+      console.error('Login error:', error);
+      setError('An error occurred during login. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -91,14 +182,22 @@ export default function UnifiedLogin({ onLogin }) {
               <button
                 type="button"
                 className={`role-btn ${role === 'worker' ? 'active' : ''}`}
-                onClick={() => setRole('worker')}
+                onClick={() => {
+                  setRole('worker');
+                  setError('');
+                }}
+                disabled={loading}
               >
                 <i className="fas fa-user"></i> Worker
               </button>
               <button
                 type="button"
                 className={`role-btn ${role === 'admin' ? 'active' : ''}`}
-                onClick={() => setRole('admin')}
+                onClick={() => {
+                  setRole('admin');
+                  setError('');
+                }}
+                disabled={loading}
               >
                 <i className="fas fa-user-shield"></i> Admin
               </button>
@@ -113,6 +212,7 @@ export default function UnifiedLogin({ onLogin }) {
               onChange={(e) => setUsername(e.target.value)}
               placeholder={`Enter ${role} username`}
               required
+              disabled={loading}
             />
           </div>
           
@@ -124,13 +224,14 @@ export default function UnifiedLogin({ onLogin }) {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter password"
               required
+              disabled={loading}
             />
           </div>
           
           {error && <div className="error-message">{error}</div>}
           
-          <button type="submit" className="login-btn">
-            Login as {role.charAt(0).toUpperCase() + role.slice(1)}
+          <button type="submit" className="login-btn" disabled={loading}>
+            {loading ? '⏳ Logging in...' : `Login as ${role.charAt(0).toUpperCase() + role.slice(1)}`}
           </button>
         </form>
         
@@ -139,6 +240,10 @@ export default function UnifiedLogin({ onLogin }) {
             <p><strong>Demo Credentials:</strong></p>
             <p>👤 Worker: worker1 / 123</p>
             <p>👑 Admin: Metroadd / Metro123</p>
+            <p>💰 Discount Admin: admin / admin123</p>
+            <p style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+              ⚡ Note: You can also register new workers from the Admin panel
+            </p>
           </div>
         </div>
       </div>
